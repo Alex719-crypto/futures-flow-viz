@@ -2,6 +2,7 @@ from flask import Flask, jsonify, request, Response
 import threading
 import websocket
 import json
+import os
 from collections import deque
 
 app = Flask(__name__)
@@ -311,4 +312,5 @@ def data():
 
 if __name__ == "__main__":
     threading.Thread(target=start_ws, daemon=True).start()
-    app.run(port=5000)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)

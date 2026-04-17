@@ -1,11 +1,16 @@
-from flask import Flask, jsonify, request, Response
+from flask import Flask, jsonify, request, Response, redirect, session
 import threading
 import websocket
 import json
 import os
+import requests
 from collections import deque
 
 app = Flask(__name__)
+app.secret_key = os.environ.get("SECRET_KEY", "whale-viz-secret-2024")
+
+# Whop API
+WHOP_API_KEY = os.environ.get("WHOP_API_KEY")
 
 SYMBOLS = ["btcusdt", "ethusdt", "solusdt"]
 TRADE_LIMIT = 500
@@ -19,6 +24,100 @@ state = {
         "last_whale": None
     } for s in SYMBOLS
 }
+
+def check_whop_membership(email):
+    if not WHOP_API_KEY:
+        return True
+    headers = {"Authorization": f"Bearer {WHOP_API_KEY}"}
+    try:
+        response = requests.get(
+            "https://api.whop.com/api/v2/memberships",
+            headers=headers,
+            params={"email": email}
+        )
+        if response.status_code == 200:
+            data = response.json()
+            for m in data.get("data", []):
+                if m.get("valid") == True:
+                    return True
+        return False
+    except:
+        return False
+
+LOGIN_PAGE = """
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Futures Flow Viz - Login</title>
+    <style>
+        body {
+            margin: 0;
+            background: #05070a;
+            color: white;
+            font-family: Arial, sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+        }
+        .container {
+            text-align: center;
+            padding: 50px;
+            background: rgba(17, 24, 39, 0.95);
+            border-radius: 15px;
+            border: 1px solid #1f2937;
+            box-shadow: 0 0 40px rgba(59,130,246,0.2);
+        }
+        h1 { color: #3b82f6; margin-bottom: 10px; }
+        p { color: #9ca3af; margin-bottom: 25px; }
+        input {
+            padding: 15px 20px;
+            font-size: 16px;
+            border: 1px solid #374151;
+            border-radius: 8px;
+            background: #111827;
+            color: white;
+            width: 280px;
+            margin-bottom: 15px;
+        }
+        input:focus { outline: none; border-color: #3b82f6; }
+        button {
+            padding: 15px 40px;
+            font-size: 16px;
+            background: #3b82f6;
+            color: white;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-weight: bold;
+        }
+        button:hover { background: #2563eb; }
+        .error { color: #ef4444; margin-top: 15px; }
+        .buy-link {
+            display: block;
+            margin-top: 25px;
+            color: #3b82f6;
+            text-decoration: none;
+        }
+        .buy-link:hover { text-decoration: underline; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🐳 Futures Flow Viz</h1>
+        <p>Enter your Whop email to access</p>
+        <form method="POST" action="/login">
+            <input type="email" name="email" placeholder="your@email.com" required><br>
+            <button type="submit">Access Dashboard</button>
+        </form>
+        <p class="error">{error}</p>
+        <a class="buy-link" href="https://whop.com/futures-flow-viz/" target="_blank">
+            Don't have access? Subscribe here →
+        </a>
+    </div>
+</body>
+</html>
+"""
 
 HTML_PAGE = """
 <!DOCTYPE html>
@@ -73,6 +172,23 @@ HTML_PAGE = """
             color: #3b82f6;
         }
 
+        #logout-btn {
+            margin-left: 20px;
+            background: #374151;
+            border: 1px solid #4b5563;
+            color: #9ca3af;
+            padding: 10px 18px;
+            cursor: pointer;
+            border-radius: 8px;
+            font-weight: 600;
+            text-decoration: none;
+        }
+
+        #logout-btn:hover {
+            background: #4b5563;
+            color: white;
+        }
+
         #whale-alert {
             position: fixed;
             top: 90px;
@@ -98,6 +214,7 @@ HTML_PAGE = """
         <button class="btn" onclick="setSymbol('ethusdt', this)">ETH</button>
         <button class="btn" onclick="setSymbol('solusdt', this)">SOL</button>
         <div id="price">--</div>
+        <a id="logout-btn" href="/logout">Logout</a>
     </div>
 
     <div id="whale-alert"></div>
@@ -128,6 +245,10 @@ HTML_PAGE = """
         async function updateData() {
             try {
                 const res = await fetch('/data?symbol=' + currentSymbol);
+                if (res.status === 401) {
+                    window.location.href = '/';
+                    return;
+                }
                 const data = await res.json();
 
                 document.getElementById('price').innerText =
@@ -298,10 +419,29 @@ def start_ws():
 
 @app.route("/")
 def index():
+    if "email" not in session:
+        return Response(LOGIN_PAGE.replace("{error}", ""), mimetype="text/html")
     return Response(HTML_PAGE, mimetype="text/html")
+
+@app.route("/login", methods=["POST"])
+def login():
+    email = request.form.get("email", "").strip().lower()
+    if not email:
+        return Response(LOGIN_PAGE.replace("{error}", "Please enter email"), mimetype="text/html")
+    if check_whop_membership(email):
+        session["email"] = email
+        return redirect("/")
+    return Response(LOGIN_PAGE.replace("{error}", "No active subscription found. Please subscribe first."), mimetype="text/html")
+
+@app.route("/logout")
+def logout():
+    session.pop("email", None)
+    return redirect("/")
 
 @app.route("/data")
 def data():
+    if "email" not in session:
+        return jsonify({"error": "unauthorized"}), 401
     sym = request.args.get("symbol", "btcusdt")
     with lock:
         return jsonify({
